@@ -2,7 +2,7 @@
 
 ------------------------------------------------------
 
-This repository contains the data (single phylogenetic tree from Stein et al., 2018 and batoid model data frame) and analysis for model fitting for the paper 'Offspring size resolves a population growth paradox in rays and skates', published in [insert publication info]. The preprint is available at [https://doi.org/10.1101/2024.01.02.573919]. The study investigated the scaling of offspring body mass with the maximum intrinsic rate of population increase (rmax) as well as adult body mass, temperature, and depth for 85 ray and skate species (Superorder Batoidea).
+This repository contains the data (single phylogenetic tree from Stein et al., 2018 and batoid model data frame) and analysis for model fitting for the paper 'Offspring size resolves a population growth paradox in rays and skates', published in [insert publication info]. The preprint is available at https://doi.org/10.1101/2024.01.02.573919. The study investigated the scaling of offspring body mass with the maximum intrinsic rate of population increase (rmax) as well as adult body mass, temperature, and depth for 85 ray and skate species (Superorder Batoidea).
 
 The repository contains a single script ```batoid-rmax-offspring-scaling.R``` required to fit phylogenetic generalised linear models with data available in the `/data` directory.
 
