@@ -34,6 +34,58 @@ Spatial ranges: **`chondrichthyes.species.ranges`** (e.g. `remotes::install_gith
 
 Optional / script-specific: `tidyverse`, `hexbin` (shark hexbin chunk in `06_`).
 
+## Parallel processing (`future` / `furrr`)
+
+Heavy steps (`01_SpatialDataProcessing.Rmd`, `calculate_hex_metrics2()` in **`00_functions.R`**) use **future**-style parallelism. You set a **plan** for the R session; it applies to `furrr::future_*` and `future.apply` calls.
+
+### All platforms: multisession (recommended default)
+
+**Multisession** starts separate R worker processes. It works on **macOS, Linux, and Windows** and matches the approach in `01_SpatialDataProcessing.Rmd` (hex–range intersections):
+
+```r
+library(future)
+plan(multisession, workers = max(1, parallel::detectCores() - 1))
+```
+
+When parallel work is done, return to a single process (as `01_` does) with:
+
+```r
+plan(sequential)
+```
+
+**Choosing `workers`:** `parallel::detectCores() - 1` leaves one core free for the OS. If RAM fills up (each worker holds a full R process), reduce workers (e.g. `workers = 4`) or close other applications.
+
+### macOS and Linux only: optional `multicore` (forking)
+
+On **Unix-like** systems (macOS, Linux), you can try **`plan(multicore, ...)`**, which forks the current R process. Forking can be faster or more memory-efficient for some tasks, but:
+
+- It is **not available on Windows**; Windows users should keep **`multisession`**.
+- It can interact badly with some GUIs, packages, or BLAS threads; if you see hangs or crashes, switch back to **`multisession`**.
+
+Example that picks a strategy by OS:
+
+```r
+library(future)
+w <- max(1, parallel::detectCores() - 1)
+if (.Platform$OS.type == "windows") {
+  plan(multisession, workers = w)
+} else {
+  plan(multicore, workers = w)   # try multisession here if multicore misbehaves
+}
+```
+
+### RStudio / troubleshooting
+
+If workers fail to start or jobs stall in **RStudio**, run the document from a plain R session or the shell (still from the **repository root**):
+
+```r
+rmarkdown::render("mapping/01_SpatialDataProcessing.Rmd")
+```
+
+### Clusters (optional)
+
+On an HPC cluster you can use **`future::plan(cluster, workers = ...)`** with **`parallel::makeCluster()`**; that is optional for typical laptop runs.
+
 ## Source
 
 Adapted from the `Rscripts/SpeciesRichnessMaps/` workflow in the **OffspringSizeRmax** / related analysis repositories; paths were rewritten to use **`mapping/`** and **`mapping/figures/`** so this folder can live alongside **`offspring_size_mortality/`** in **batoid-rmax-offspring-scaling**.
