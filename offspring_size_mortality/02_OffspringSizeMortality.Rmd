@@ -1,0 +1,532 @@
+---
+title: "02_OffspringSizeMortality"
+author: "Nicholas K. Dulvy"
+date: "2026-01-25"
+output: html_document
+---
+```{r}
+library(ggplot2)
+library(tidyr)
+library(tibble)
+library(patchwork)
+library(dplyr)
+```
+
+```{r Final figure}
+# =========================================================
+# GLOBAL SETTINGS (edit knobs here)
+# =========================================================
+E <- 0.65
+k <- 8.62e-5
+
+T_set <- c(5, 15, 25)
+mass_grid <- 10^seq(-3, 3, length.out = 300)
+
+pred_mult <- c("Low predation" = 0.8,
+               "Medium predation" = 1.0,
+               "High predation" = 1.2)
+
+# Keep only medium predation use TRUE, else FALSE
+USE_SINGLE_SCENARIO <- TRUE
+scenarios <- if (USE_SINGLE_SCENARIO) "Medium predation" else names(pred_mult)
+
+# Cohort settings
+N0 <- 1000
+t_years <- seq(0, 10, by = 0.02)
+N_floor <- 1
+sizes <- c("Skate (100 g)" = 0.1,
+           "Ray (1000 g)"  = 1.0)
+
+# --- Publication font knobs ---
+BASE_SIZE     <- 8
+TITLE_SIZE    <- 12
+SUBTITLE_SIZE <- 8
+AXIS_TITLE    <- 8
+AXIS_TEXT     <- 7
+STRIP_TEXT    <- 8
+LEG_TEXT      <- 7
+LEG_TITLE     <- 8
+LABEL_SIZE    <- 4.5  # geom_text size (ggplot units)
+# --- Fixed cohort x-axis (time, years) ---
+TIME_MIN    <- 0
+TIME_MAX    <- 10
+TIME_BREAKS <- seq(2, 10, by = 2)
+TIME_MINOR  <- seq(1, 10, by = 1)
+
+SIZE_LABELS <- c(
+  "Skate" = expression(atop("Skate", "(100 g)")),
+  "Ray"   = expression(atop("Ray", "(1000 g)"))
+)
+
+# --- Line width knobs (no dashed lines) ---
+LW_COMPONENT <- c("Intrinsic (metabolic)" = 1.25,
+                  "Predation"            = 1.25,
+                  "Total"                = 1.5)
+
+LW_SIZE <- c("Skate (100 g)" = 1.25,
+             "Ray (1000 g)"  = 1.25)
+
+# --- Colours (now by line type, not scenario) ---
+COL_COMPONENT <- c("Intrinsic (metabolic)" = "#D95F02", #orange
+                   "Predation"            = "#1B9E77", #teal
+                   "Total"                = "#7F7F7F")  # grey
+
+COL_SIZE <- c("Skate (100 g)" = "#1F78B4",
+              "Ray (1000 g)"  = "#E31A1C")
+
+TAG_SIZE <- 12
+
+# STRIP_COLS <- c(
+#   "5°C"  = "#6BAED6",   # blue
+#   "15°C" = "#F768A1",   # pink
+#   "25°C" = "#FB6A4A"    # red
+# )
+
+# --- Theme object (journal-ish) ---
+theme_pub <- theme_classic(base_size = BASE_SIZE) +
+  theme(
+    plot.title        = element_text(size = TITLE_SIZE, face = "bold"),
+    plot.subtitle     = element_blank(),   # <-- ADD THIS
+    axis.title        = element_text(size = AXIS_TITLE),
+    axis.text         = element_text(size = AXIS_TEXT),
+    strip.text        = element_text(size = STRIP_TEXT, face = "bold"),
+    legend.text       = element_text(size = LEG_TEXT),
+    legend.key.height = grid::unit(3.0, "mm"),
+    legend.key.width  = grid::unit(5.0, "mm"),
+    # give the labels breathing room on the right
+    plot.margin       = margin(4, 10, 4, 4),  # top, right, bottom, left (pt)
+    plot.tag = element_text(face = "bold", size = TAG_SIZE),
+    # optional: nudge inward a bit
+    plot.tag.position = c(0.02, 0.98)
+  )
+
+# --- Shared y-scale for cohort panels (C & D) ---
+y_cohort_scale <- scale_y_log10(
+  limits = c(1, 1000),          # adjust if needed
+  breaks = c(1, 10, 100, 1000),
+  minor_breaks = c(2, 5, 20, 50, 200, 500)
+)
+# =========================================================
+# HELPERS
+# =========================================================
+cohort <- function(N0, mu_total, t) N0 * exp(-mu_total * t)
+
+right_facet_level <- function(df) tail(levels(df$TempC), 1)
+
+# anchor label x *inside* the panel (prevents falling off)
+x_interior_log <- function(x_min, x_max, frac = 0.92) {
+  10^(log10(x_min) + frac * (log10(x_max) - log10(x_min)))
+}
+x_interior_lin <- function(x_min, x_max, frac = 0.92) {
+  x_min + frac * (x_max - x_min)
+}
+
+# =========================================================
+# 1) INTRINSIC MORTALITY (metabolic): size + temperature dependent
+# =========================================================
+mu_metabolic_rel <- function(M_kg, T_C) {
+  T_K <- T_C + 273.15
+  M_kg^(-1/4) * exp(-E / (k * T_K))
+}
+
+# Calibrate: mu_metabolic(100 g, 15C) = 0.3 / yr
+mu_target <- 0.3
+alpha <- mu_target / mu_metabolic_rel(M_kg = 0.1, T_C = 15)
+mu_metabolic <- function(M_kg, T_C) alpha * mu_metabolic_rel(M_kg, T_C)
+
+# =========================================================
+# 2A) PREDATION MODEL A: temperature-dependent (size-independent)
+# =========================================================
+E_pred <- 0.50
+mu_predT_rel <- function(T_C) {
+  T_K <- T_C + 273.15
+  exp(-E_pred / (k * T_K))
+}
+
+mu_pred_ref_target <- 0.20
+beta_T <- mu_pred_ref_target / mu_predT_rel(T_C = 15)
+
+mu_pred_T <- function(T_C, scenario) {
+  (beta_T * mu_predT_rel(T_C)) * pred_mult[scenario]
+}
+
+# =========================================================
+# 2B) PREDATION MODEL B: size-dependent (higher in small)
+# =========================================================
+b_pred <- 0.35
+M_ref  <- 0.1
+
+mu_pred_M <- function(M_kg, scenario) {
+  mu_pred_ref_target * pred_mult[scenario] * (M_kg / M_ref)^(-b_pred)
+}
+
+# =========================================================
+# 3) Build mortality data frames (Scenario retained but may be single)
+# =========================================================
+build_mort_df_T <- function() {
+  df <- bind_rows(lapply(T_set, function(TC) {
+    bind_rows(lapply(scenarios, function(sc) {
+      mu_i <- mu_metabolic(mass_grid, TC)
+      mu_e <- rep(mu_pred_T(TC, sc), length(mass_grid))
+      mu_t <- mu_i + mu_e
+
+      bind_rows(
+        data.frame(Mass = mass_grid, Mu = mu_i, TempC = paste0(TC, "°C"),
+                   Scenario = sc, Component = "Intrinsic (metabolic)"),
+        data.frame(Mass = mass_grid, Mu = mu_e, TempC = paste0(TC, "°C"),
+                   Scenario = sc, Component = "Predation"),
+        data.frame(Mass = mass_grid, Mu = mu_t, TempC = paste0(TC, "°C"),
+                   Scenario = sc, Component = "Total")
+      )
+    }))
+  }))
+
+  df$TempC <- factor(df$TempC, levels = paste0(T_set, "°C"))
+  df$Component <- factor(df$Component, levels = names(LW_COMPONENT))
+  df
+}
+
+build_mort_df_M <- function() {
+  df <- bind_rows(lapply(T_set, function(TC) {
+    bind_rows(lapply(scenarios, function(sc) {
+      mu_i <- mu_metabolic(mass_grid, TC)
+      mu_e <- mu_pred_M(mass_grid, sc)
+      mu_t <- mu_i + mu_e
+
+      bind_rows(
+        data.frame(Mass = mass_grid, Mu = mu_i, TempC = paste0(TC, "°C"),
+                   Scenario = sc, Component = "Intrinsic (metabolic)"),
+        data.frame(Mass = mass_grid, Mu = mu_e, TempC = paste0(TC, "°C"),
+                   Scenario = sc, Component = "Predation"),
+        data.frame(Mass = mass_grid, Mu = mu_t, TempC = paste0(TC, "°C"),
+                   Scenario = sc, Component = "Total")
+      )
+    }))
+  }))
+
+  df$TempC <- factor(df$TempC, levels = paste0(T_set, "°C"))
+  df$Component <- factor(df$Component, levels = names(LW_COMPONENT))
+  df
+}
+
+df_mort_T <- build_mort_df_T()
+df_mort_M <- build_mort_df_M()
+
+# =========================================================
+# 4) Build cohort data frames
+# =========================================================
+build_cohort_df_T <- function() {
+  df <- bind_rows(lapply(T_set, function(TC) {
+    bind_rows(lapply(scenarios, function(sc) {
+      bind_rows(lapply(names(sizes), function(sz_lab) {
+        M0 <- sizes[sz_lab]
+        mu_tot <- mu_metabolic(M0, TC) + mu_pred_T(TC, sc)
+        data.frame(
+          t = t_years,
+          N = ifelse(cohort(N0, mu_tot, t_years) < 1,
+           NA,
+           cohort(N0, mu_tot, t_years)),
+          TempC = paste0(TC, "°C"),
+          Scenario = sc,
+          Size = sz_lab
+        )
+      }))
+    }))
+  }))
+
+  df$TempC <- factor(df$TempC, levels = paste0(T_set, "°C"))
+  df$Size  <- factor(df$Size, levels = names(LW_SIZE))
+  df
+}
+
+build_cohort_df_M <- function() {
+  df <- bind_rows(lapply(T_set, function(TC) {
+    bind_rows(lapply(scenarios, function(sc) {
+      bind_rows(lapply(names(sizes), function(sz_lab) {
+        M0 <- sizes[sz_lab]
+        mu_tot <- mu_metabolic(M0, TC) + mu_pred_M(M0, sc)
+        data.frame(
+          t = t_years,
+          N = ifelse(cohort(N0, mu_tot, t_years) < 1,
+           NA,
+           cohort(N0, mu_tot, t_years)),
+          TempC = paste0(TC, "°C"),
+          Scenario = sc,
+          Size = sz_lab
+        )
+      }))
+    }))
+  }))
+
+  df$TempC <- factor(df$TempC, levels = paste0(T_set, "°C"))
+  df$Size  <- factor(df$Size, levels = names(LW_SIZE))
+  df
+}
+
+df_cohort_T <- build_cohort_df_T()
+df_cohort_M <- build_cohort_df_M()
+
+# =========================================================
+# 5) LABEL NUDGE LOOKUP TABLE (THIS IS YOUR MAIN TWEAK POINT)
+#    dy is multiplicative (good for log y-axes)
+#    dx_add is additive in x-units (kg for mortality, years for cohort)
+# =========================================================
+label_nudges <- tibble::tribble(
+  ~panel,     ~key,                    ~dx_add, ~dy,
+  "mort_T",   "Intrinsic (metabolic)",   0.75,    0.75,
+  "mort_T",   "Predation",              -330.5,  0.75,
+  "mort_T",   "Total",                   300,     1.50,
+
+  "mort_M",   "Intrinsic (metabolic)",   0,       0.75,
+  "mort_M",   "Predation",              -150,    0.90,
+  "mort_M",   "Total",                   0,       4.00,
+
+  "cohort_T", "Skate (100 g)",          -4.9,       3.00,
+  "cohort_T", "Ray (1000 g)",           0.0,       26.0,
+
+  "cohort_M", "Skate (100 g)",          -3.5,   2.0,
+  "cohort_M", "Ray (1000 g)",           0.0,     16.0
+)
+
+# =========================================================
+# 6) Label data (ONLY right facet, ONLY one set of labels)
+#    - Mortality: label Components (Intrinsic/Predation/Total)
+#    - Cohort:    label Sizes (Skate/Ray) with stacked labels
+# =========================================================
+
+make_mort_labels <- function(df_mort, panel_name, x_frac = 0.92) {
+  stopifnot(length(unique(df_mort$Scenario)) == 1)  # single scenario expected
+  right <- right_facet_level(df_mort)
+
+  x_lab <- x_interior_log(min(df_mort$Mass), max(df_mort$Mass), frac = x_frac)
+
+  df_mort %>%
+    filter(TempC == right) %>%
+    group_by(TempC, Component) %>%
+    summarise(
+      x = x_lab,
+      y = approx(x = Mass, y = Mu, xout = x_lab, rule = 2)$y,
+      .groups = "drop"
+    ) %>%
+    rename(key = Component) %>%   # <-- FIX: Component (not Size)
+    left_join(label_nudges %>% filter(panel == panel_name), by = "key") %>%
+    mutate(
+      dx_add = dplyr::coalesce(dx_add, 0),
+      dy     = dplyr::coalesce(dy, 1),
+      x      = x + dx_add,
+      y      = y * dy
+    )
+}
+
+make_cohort_labels <- function(df_cohort, panel_name, t_frac = 0.92) {
+  stopifnot(length(unique(df_cohort$Scenario)) == 1)
+  right <- right_facet_level(df_cohort)
+
+  t_lab <- x_interior_lin(min(df_cohort$t), max(df_cohort$t), frac = t_frac)
+
+  df_cohort %>%
+    filter(TempC == right) %>%
+    group_by(TempC, Size) %>%
+    summarise(
+      x = t_lab,
+      y = approx(x = t, y = N, xout = t_lab, rule = 2)$y,
+      .groups = "drop"
+    ) %>%
+    rename(key = Size) %>%
+    left_join(label_nudges %>% filter(panel == panel_name), by = "key") %>%
+    mutate(
+      dx_add = dplyr::coalesce(dx_add, 0),
+      dy     = dplyr::coalesce(dy, 1),
+      x      = x + dx_add,
+      y      = y * dy,
+
+      # plotmath stacked labels (ONLY for cohort sizes)
+      key_plot = dplyr::case_when(
+        key == "Skate (100 g)" ~ "atop('Skate','(100 g)')",
+        key == "Ray (1000 g)"  ~ "atop('Ray','(1000 g)')",
+        TRUE                   ~ key
+      )
+    )
+}
+
+# Filter once to single scenario (keeps everything consistent)
+df_mort_T1   <- df_mort_T   %>% dplyr::filter(Scenario == scenarios[1])
+df_mort_M1   <- df_mort_M   %>% dplyr::filter(Scenario == scenarios[1])
+df_cohort_T1 <- df_cohort_T %>% dplyr::filter(Scenario == scenarios[1])
+df_cohort_M1 <- df_cohort_M %>% dplyr::filter(Scenario == scenarios[1])
+
+# Build label data
+lab_mort_T   <- make_mort_labels(df_mort_T1, "mort_T")
+lab_mort_M   <- make_mort_labels(df_mort_M1, "mort_M")
+lab_cohort_T <- make_cohort_labels(df_cohort_T1, "cohort_T")
+lab_cohort_M <- make_cohort_labels(df_cohort_M1, "cohort_M")
+# =========================================================
+# 7) PLOTS
+#    - Mortality: colour = Component, linewidth = Component
+#    - Cohort:    colour = Size,      linewidth = Size
+#    - Labels: placed INSIDE panel with hjust = 1 (prevents clipping)
+# =========================================================
+p_mort_T <- ggplot(df_mort_T1,
+                   aes(Mass, Mu,
+                       group = Component,
+                       colour = Component,
+                       linewidth = Component)) +
+  geom_line() +
+  scale_colour_manual(values = COL_COMPONENT) +
+  scale_linewidth_manual(values = LW_COMPONENT) +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_wrap(~ TempC, ncol = 3) +
+  labs(
+    x = "Body mass (kg)",
+    y = expression("Mortality rate " * mu * " (per year, log"[10] * " scale)"),
+    title = "Temp-dependent predation (size-independent)",
+    subtitle = "Line colour/width = intrinsic, predation, total"
+  ) +
+  geom_text(
+    data = lab_mort_T,
+    aes(x = x, y = y, label = key, colour = key),
+    inherit.aes = FALSE,
+    hjust = 1,           # anchor text INSIDE at x
+    size  = LABEL_SIZE
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_pub
+
+p_mort_M <- ggplot(df_mort_M1,
+                   aes(Mass, Mu,
+                       group = Component,
+                       colour = Component,
+                       linewidth = Component)) +
+  geom_line() +
+  scale_colour_manual(values = COL_COMPONENT) +
+  scale_linewidth_manual(values = LW_COMPONENT) +
+  scale_x_log10() +
+  scale_y_log10() +
+  facet_wrap(~ TempC, ncol = 3) +
+  labs(
+    x = "Body mass (kg)",
+    y = expression("Mortality rate " * mu * " (per year, log"[10] * " scale)"),
+    title = "Size-dependent predation",
+    subtitle = "Line colour/width = intrinsic, predation, total"
+  ) +
+  geom_text(
+    data = lab_mort_M,
+    aes(x = x, y = y, label = key, colour = key),
+    inherit.aes = FALSE,
+    hjust = 1,
+    size  = LABEL_SIZE
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_pub
+
+p_cohort_T <- ggplot(df_cohort_T1,
+                     aes(t, N,
+                         group = Size,
+                         colour = Size,
+                         linewidth = Size)) +
+  geom_line(na.rm = TRUE) +
+  scale_colour_manual(values = COL_SIZE) +
+  scale_linewidth_manual(values = LW_SIZE) +
+
+  ## ---- FIXED TIME AXIS ----
+  scale_x_continuous(
+    limits = c(TIME_MIN, TIME_MAX),
+    breaks = TIME_BREAKS,
+    minor_breaks = TIME_MINOR,
+    expand = c(0, 0)
+  ) +
+
+  scale_y_log10() +
+  facet_wrap(~ TempC, ncol = 3) +
+  labs(
+    x = "Time (years)",
+    y = "Cohort size N(t)",
+    title = "Cohort survival: metabolic + temp-dependent predation",
+    subtitle = "Line colour/width = offspring size"
+  ) +
+  geom_text(
+    data = lab_cohort_T,
+    aes(x = x, y = y, label = key_plot, colour = key),
+    inherit.aes = FALSE,
+    hjust = 1,
+    size  = LABEL_SIZE,
+    parse = TRUE
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_pub
+
+p_cohort_M <- ggplot(df_cohort_M1,
+                     aes(t, N,
+                         group = Size,
+                         colour = Size,
+                         linewidth = Size)) +
+  geom_line(na.rm = TRUE) +
+  scale_colour_manual(values = COL_SIZE) +
+  scale_linewidth_manual(values = LW_SIZE) +
+
+  ## ---- FIXED TIME AXIS ----
+  scale_x_continuous(
+    limits = c(TIME_MIN, TIME_MAX),
+    breaks = TIME_BREAKS,
+    minor_breaks = TIME_MINOR,
+    expand = c(0, 0)
+  ) +
+
+  scale_y_log10() +
+  facet_wrap(~ TempC, ncol = 3) +
+  labs(
+    x = "Time (years)",
+    y = "Cohort size N(t)",
+    title = "Cohort survival: metabolic + size-dependent predation",
+    subtitle = "Line colour/width = offspring size"
+  ) +
+  geom_text(
+    data = lab_cohort_M,
+    aes(x = x, y = y, label = key_plot, colour = key),
+    inherit.aes = FALSE,
+    hjust = 1,
+    size  = LABEL_SIZE,
+    parse = TRUE
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_pub
+
+# ---------------------------------------------------------
+# 8) Assemble (NO theme inside plot_annotation)
+# ---------------------------------------------------------
+
+SHOW_LEGEND <- FALSE
+LEG_POS <- if (SHOW_LEGEND) "bottom" else "none"
+
+p_mort_T   <- p_mort_T   + theme(legend.position = LEG_POS)
+p_mort_M   <- p_mort_M   + theme(legend.position = LEG_POS)
+p_cohort_T <- p_cohort_T + theme(legend.position = LEG_POS)
+p_cohort_M <- p_cohort_M + theme(legend.position = LEG_POS)
+
+p_2x2 <- (p_mort_T | p_mort_M) /
+         (p_cohort_T | p_cohort_M) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(tag_levels = "a")
+
+
+p_2x2
+
+# =========================================================
+# 9) Save
+# =========================================================
+ggsave("figures/metabolic_predation_260125.pdf",
+       plot = p_2x2, width = 14, height = 9, device = cairo_pdf)
+
+# Save high-resolution PNG (journal + presentations)
+ggsave(
+  "figures/metabolic_predation_260125.png",
+  plot   = p_2x2,
+  width  = 14,
+  height = 9,
+  units  = "in",
+  dpi    = 600,
+  bg     = "white"
+)
+```
+
