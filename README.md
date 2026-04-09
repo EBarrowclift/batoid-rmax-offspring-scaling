@@ -12,3 +12,7 @@ R script edited from https://github.com/EBarrowclift/batoid-rmax-scaling created
 
 The **`mapping/`** directory holds an R Markdown pipeline (hex-based global richness maps for skates, rays, and sharks, plus publication figures). Open the repository root (the `.Rproj` file) before rendering. See **`mapping/README.md`** for run order, dependencies, and required **`data/processed/`** files.
 
+### Depth vs temperature (segmented regression)
+
+The **`depth_temp_analysis/`** directory contains **`04_DepthTempAnalysis.Rmd`**, which uses **`data/stein-et-al-single.tree`** and **`data/batoid_model_offspring.csv`** and writes figures to **`depth_temp_analysis/figures/`**. See **`depth_temp_analysis/README.md`** for R package dependencies and input details.
+
