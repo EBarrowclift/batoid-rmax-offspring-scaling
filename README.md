@@ -8,3 +8,7 @@ The repository contains a single script ```batoid-rmax-offspring-scaling.R``` re
 
 R script edited from https://github.com/EBarrowclift/batoid-rmax-scaling created for the paper Barrowclift et al.,, 2023. 'Tropical rays are intrinsically more sensitive to overfishing than the temperate skates'. https://doi.org/10.1016/j.biocon.2023.110003.
 
+### Species richness mapping
+
+The **`mapping/`** directory holds an R Markdown pipeline (hex-based global richness maps for skates, rays, and sharks, plus publication figures). Open the repository root (the `.Rproj` file) before rendering. See **`mapping/README.md`** for run order, dependencies, and required **`data/processed/`** files.
+

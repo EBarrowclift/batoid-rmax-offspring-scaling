@@ -1,0 +1,110 @@
+---
+title: "SpatialDataProcessing"
+output: html_document
+---
+
+## Running in Cursor
+
+Run **`01_SpatialDataProcessing.Rmd`** first in this folder (after **`00_functions.R`** is in place). It writes spatial inputs to `data/processed/`. Then run **`02_SpeciesRichnessMaps.Rmd`**, then **`03_SkateRayRichnessPublication.Rmd`** for the four-panel figure, or **`03b_SkateRayRichnessPublicationReversed.Rmd`** for the reversed-viridis version.
+
+```{r setup_spatial_processing}
+library(sf)
+library(dplyr)
+library(here)
+library(chondrichthyes.species.ranges)
+library(future.apply)
+library(purrr)
+library(furrr)
+
+# Load shared functions (calculate_hex_metrics2)
+source(here("mapping/00_functions.R"))
+
+# Load hex cells and ensure valid geometry
+hex_path <- here("data/processed/hex.rds")
+if (file.exists(hex_path)) {
+  message("Using existing hex.rds from data/processed.")
+  hex <- readRDS(hex_path)
+} else {
+  hex <- st_read(here("mapping/HexCells")) %>%
+    st_make_valid()
+  saveRDS(hex, hex_path)
+}
+
+# Load species ranges and match CRS to hex grid
+ranges_path <- here("data/processed/ranges.rds")
+if (file.exists(ranges_path)) {
+  message("Using existing ranges.rds from data/processed.")
+  ranges <- readRDS(ranges_path)
+} else {
+  ranges <- chondrichthyes.species.ranges::get_ranges() %>%
+    st_make_valid() %>%
+    st_transform(st_crs(hex))
+  saveRDS(ranges, ranges_path)
+}
+```
+
+```{r hex_richness}
+# Compute per-hex species richness and save
+sf::sf_use_s2(FALSE)
+
+hex_richness_path <- here("data/processed/hex_richness.rds")
+if (file.exists(hex_richness_path)) {
+  message("Using existing hex_richness.rds from data/processed.")
+  hex <- readRDS(hex_richness_path)
+} else {
+  future::plan(future::multisession, workers = max(1, parallel::detectCores() - 1))
+
+  sp_id <- as.integer(factor(ranges$sci_name))
+  chunk_size <- 2000
+  idx_chunks <- split(
+    seq_len(nrow(hex)),
+    ceiling(seq_len(nrow(hex)) / chunk_size)
+  )
+
+  pb <- txtProgressBar(min = 0, max = nrow(hex), style = 3)
+  futs <- lapply(idx_chunks, function(ii) {
+    future::future(
+      {
+        hit <- st_intersects(hex[ii, ], ranges)
+        vapply(hit, function(i) length(unique(sp_id[i])), integer(1))
+      },
+      packages = "sf"
+    )
+  })
+
+  hex$richness <- integer(nrow(hex))
+  processed <- 0L
+  for (k in seq_along(futs)) {
+    values <- future::value(futs[[k]])
+    hex$richness[idx_chunks[[k]]] <- values
+    processed <- processed + length(values)
+    setTxtProgressBar(pb, processed)
+    gc(FALSE)
+  }
+  close(pb)
+  future::plan(future::sequential)
+
+  saveRDS(hex, hex_richness_path)
+}
+```
+
+```{r skate_ray_metrics}
+# Compute skate and ray metrics and save (if missing)
+hex_metrics_skates_path <- here("data/processed/hex_with_metrics_skates.rds")
+hex_metrics_rays_path <- here("data/processed/hex_with_metrics_rays.rds")
+
+if (!file.exists(hex_metrics_skates_path) || !file.exists(hex_metrics_rays_path)) {
+  ranges_skates <- ranges %>%
+    filter(order_ == "RAJIFORMES")
+  ranges_rays <- ranges %>%
+    filter(order_ %in% c("RHINOPRISTIFORMES", "MYLIOBATIFORMES", "TORPEDINIFORMES"))
+
+  hex_with_metrics_skates <- calculate_hex_metrics2(ranges_skates, hex)
+  hex_with_metrics_rays <- calculate_hex_metrics2(ranges_rays, hex)
+
+  saveRDS(hex_with_metrics_skates, hex_metrics_skates_path)
+  saveRDS(hex_with_metrics_rays, hex_metrics_rays_path)
+} else {
+  message("Using existing hex_with_metrics_*.rds from data/processed.")
+}
+```

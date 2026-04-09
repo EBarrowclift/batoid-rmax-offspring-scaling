@@ -1,0 +1,214 @@
+---
+title: "SkateRayRichness publication four-panel"
+output: html_document
+---
+
+```{r setup_skate_ray_publication}
+# File: 03_SkateRayRichnessPublication.Rmd. Reversed viridis: 03b_SkateRayRichnessPublicationReversed.Rmd.
+# Self-contained: does not rely on 02_SpeciesRichnessMaps.Rmd map chunk objects.
+# Prerequisites: data/processed/hex_with_metrics_skates.rds and ..._rays.rds
+
+library(tidyverse)
+library(here)
+library(sf)
+library(patchwork)
+library(rnaturalearth)
+
+source(here("mapping/00_functions.R"))
+
+hex_metrics_skates_path <- here("data/processed/hex_with_metrics_skates.rds")
+hex_metrics_rays_path <- here("data/processed/hex_with_metrics_rays.rds")
+if (!file.exists(hex_metrics_skates_path) || !file.exists(hex_metrics_rays_path)) {
+  stop("Missing hex_with_metrics_*.rds. Run 01_SpatialDataProcessing.Rmd then 02_SpeciesRichnessMaps.Rmd first.")
+}
+hex_with_metrics_skates <- readRDS(hex_metrics_skates_path)
+hex_with_metrics_rays <- readRDS(hex_metrics_rays_path)
+
+# Match 02_SpeciesRichnessMaps.Rmd setup_species_richness_maps for aligned maps + scatters (°N WGS84)
+pub_lat_ylim_deg <- c(-90, 90)
+```
+
+```{r publication_four_panel}
+date_tag <- format(Sys.Date(), "%y%m%d")
+
+# Publication PNG: match 03b (~11.4k × 4.2k px); column width used for pt → NPC legend nudge
+pub_fig_width_in <- 19
+pub_fig_height_in <- 7
+pub_fig_dpi <- 600
+pub_panel_width_in <- pub_fig_width_in / 2
+
+add_lat_lon <- function(sf_obj) {
+  pts <- st_point_on_surface(sf_obj)
+  pts_ll <- st_transform(pts, 4326)
+  coords <- st_coordinates(pts_ll)
+  sf_obj$lon <- coords[, "X"]
+  sf_obj$lat <- coords[, "Y"]
+  sf_obj
+}
+
+plot_lat_richness <- function(sf_obj, title_text, lat_limits, lat_ylim = NULL) {
+  plot_df <- sf_obj %>%
+    st_drop_geometry() %>%
+    dplyr::ungroup() %>%
+    mutate(lat = as.numeric(lat)) %>%
+    filter(is.finite(lat), is.finite(species_richness), species_richness > 0) %>%
+    mutate(lat_bin = floor(lat / 5) * 5)
+
+  p95_df <- plot_df %>%
+    group_by(lat_bin) %>%
+    summarise(
+      lat_mid = dplyr::first(lat_bin) + 2.5,
+      richness_p95 = quantile(species_richness, 0.95, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(lat_mid)
+
+  loess_fit <- loess(richness_p95 ~ lat_mid, data = p95_df, span = 0.5)
+  p95_df$richness_fit <- pmax(0, predict(loess_fit, newdata = p95_df))
+
+  y_lim <- if (is.null(lat_ylim)) {
+    range(c(plot_df$lat, p95_df$lat_mid, lat_limits), na.rm = TRUE)
+  } else {
+    lat_ylim
+  }
+  scatter_x_max <- 65
+  # Legend NPC x: inset + 5 richness units right, then 2 pt left (ggplot2 needs numeric NPC, not unit()).
+  legend_x_npc <- pmin(1, 0.94 + 5 / scatter_x_max) - (2 / 72) / pub_panel_width_in
+  legend_x_npc <- pmax(0, legend_x_npc)
+
+  # Scatter colour: viridis direction -1; 03b uses direction = 1.
+  ggplot(plot_df, aes(x = species_richness, y = lat)) +
+    geom_point(aes(color = species_richness), size = 1.2, alpha = 1) +
+    scale_color_viridis_c(option = "D", direction = -1) +
+    geom_path(
+      data = p95_df,
+      aes(x = richness_fit, y = lat_mid),
+      color = "grey75",
+      linewidth = 0.7,
+      inherit.aes = FALSE
+    ) +
+    scale_x_continuous(
+      limits = c(0, scatter_x_max),
+      expand = c(0, 0),
+      breaks = c(0, 20, 40, 60)
+    ) +
+    scale_y_continuous(
+      breaks = seq(-90, 90, by = 30),
+      labels = lat_break_labels
+    ) +
+    coord_cartesian(
+      xlim = c(0, scatter_x_max),
+      ylim = y_lim,
+      expand = FALSE
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      plot.title.position = "plot",
+      plot.title = element_text(face = "bold", size = 12, hjust = 0),
+      legend.position = c(legend_x_npc, 0.07),
+      legend.justification = c(1, 0),
+      legend.direction = "vertical",
+      legend.background = element_rect(fill = "white", color = NA),
+      legend.margin = margin(2, 4, 4, 4, "pt")
+    ) +
+    labs(
+      title = title_text,
+      x = "Species richness",
+      y = "Latitude",
+      color = "Richness"
+    )
+}
+
+hex_with_metrics_skates <- add_lat_lon(hex_with_metrics_skates)
+hex_with_metrics_rays <- add_lat_lon(hex_with_metrics_rays)
+
+lat_limits <- range(
+  c(hex_with_metrics_skates$lat, hex_with_metrics_rays$lat),
+  na.rm = TRUE
+)
+
+# Maps: default fill viridis (direction -1) from plot_species_richness_map(); 03b overrides to direction = 1.
+skate_map <- plot_species_richness_map(
+  hex_with_metrics_skates,
+  map_title = NULL,
+  ylim_lat_deg = pub_lat_ylim_deg
+) %>%
+  apply_lat_axis_labels()
+
+ray_map <- plot_species_richness_map(
+  hex_with_metrics_rays,
+  map_title = NULL,
+  ylim_lat_deg = pub_lat_ylim_deg
+) %>%
+  apply_lat_axis_labels()
+
+map_title_nudge_pt <- 0
+
+skate_map <- skate_map +
+  labs(title = "a. skate richness", tag = NULL) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(
+      face = "bold",
+      size = 12,
+      hjust = 0,
+      margin = margin(l = map_title_nudge_pt, b = 4, unit = "pt")
+    ),
+    plot.tag = element_blank(),
+    plot.margin = margin(4, 2, 2, 2, "pt")
+  )
+
+ray_map <- ray_map +
+  labs(title = "c. ray richness", tag = NULL) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(
+      face = "bold",
+      size = 12,
+      hjust = 0,
+      margin = margin(l = map_title_nudge_pt, b = 4, unit = "pt")
+    ),
+    plot.tag = element_blank(),
+    plot.margin = margin(2, 2, 4, 2, "pt")
+  )
+
+skate_plot <- plot_lat_richness(
+  hex_with_metrics_skates,
+  "b. skate richness vs. latitude",
+  lat_limits,
+  lat_ylim = pub_lat_ylim_deg
+) +
+  theme(plot.margin = margin(4, 2, 2, 2, "pt"))
+
+ray_plot <- plot_lat_richness(
+  hex_with_metrics_rays,
+  "d. ray richness by latitude",
+  lat_limits,
+  lat_ylim = pub_lat_ylim_deg
+) +
+  theme(plot.margin = margin(2, 2, 4, 2, "pt"))
+
+four_panel <- patchwork::wrap_plots(
+  skate_map,
+  skate_plot,
+  ray_map,
+  ray_plot,
+  ncol = 2,
+  nrow = 2,
+  byrow = TRUE,
+  widths = grid::unit(c(-1, 1), c("null", "null")),
+  heights = c(1, 1)
+)
+
+ggsave(
+  filename = here(sprintf("mapping/figures/SkateRayRichness_withLatitude_%s.png", date_tag)),
+  plot = four_panel,
+  width = pub_fig_width_in,
+  height = pub_fig_height_in,
+  units = "in",
+  dpi = pub_fig_dpi,
+  bg = "white"
+)
+```

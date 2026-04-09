@@ -1,0 +1,180 @@
+---
+title: "SpeciesRichnessMaps"
+output: html_document
+---
+
+```{r setup_species_richness_maps}
+# Chunk name suggestion: setup_species_richness_maps
+# Purpose: load packages, shared functions, and the hex grid for mapping.
+# remotes::install_github("Marine-Biodiversity-Conservation-Lab/chondrichthyes.species.ranges")
+
+library(tidyverse)
+library(here)
+library(sf)
+library(patchwork)
+library(rnaturalearth)
+# Load shared functions
+source(here("mapping/00_functions.R"))
+
+# Load hex cells (precomputed)
+hex_path <- here("data/processed/hex.rds")
+if (!file.exists(hex_path)) {
+  stop("Missing data/processed/hex.rds. Run 01_SpatialDataProcessing.Rmd first.")
+}
+hex <- readRDS(hex_path)
+
+# Shared map + scatter latitude window (°N, WGS84); maps (coord_sf ylim) and scatters use this
+pub_lat_ylim_deg <- c(-90, 90)
+```
+
+```{r data_loading}
+# Load required spatial inputs. If these files are missing, run
+# mapping/01_SpatialDataProcessing.Rmd first.
+# This script expects:
+# - Precomputed ranges and metric outputs in data/processed
+
+# Species ranges (precomputed)
+ranges_path <- here("data/processed/ranges.rds")
+
+ranges <- readRDS(ranges_path)
+
+# Skate/ray metric grids (precomputed)
+hex_metrics_skates_path <- here("data/processed/hex_with_metrics_skates.rds")
+hex_metrics_rays_path <- here("data/processed/hex_with_metrics_rays.rds")
+if (!file.exists(hex_metrics_skates_path) || !file.exists(hex_metrics_rays_path)) {
+  stop("Missing hex_with_metrics_*.rds. Run 01_SpatialDataProcessing.Rmd first.")
+}
+hex_with_metrics_skates <- readRDS(hex_metrics_skates_path)
+hex_with_metrics_rays <- readRDS(hex_metrics_rays_path)
+
+# Optional: unique-richness grid (precomputed)
+hex_in_path <- here("data/processed/hex_in_richness_unique.rds")
+hex_in <- if (file.exists(hex_in_path)) readRDS(hex_in_path) else NULL
+
+# Subset ranges for summaries
+ranges_skates <- ranges %>%
+  filter(order_ == "RAJIFORMES")
+ranges_rays <- ranges %>%
+  filter(order_ %in% c("RHINOPRISTIFORMES", "MYLIOBATIFORMES", "TORPEDINIFORMES"))
+```
+
+```{r spatial_biodiversity_function}
+# Chunk name suggestion: spatial_biodiversity_function
+# Purpose: reference the shared biodiversity metric function.
+# calculate_hex_metrics2() is sourced from mapping/00_functions.R
+# tic("Hex biodiversity metrics")
+# hex_with_metrics2 <- calculate_hex_metrics2(ranges_skates, hex)
+# toc()
+```
+
+```{r mapping_function}
+# Chunk name suggestion: mapping_function
+# Purpose: reference the shared plotting function.
+# plot_species_richness_map() is sourced from mapping/00_functions.R
+```
+
+```{r run_skate_ray_richness_maps labels and legends}
+# Chunk name suggestion: run_skate_ray_richness_maps
+# Purpose: compute richness metrics for skates/rays and export maps.
+# Use precomputed metrics from data_loading
+# Latitude extent for maps comes from pub_lat_ylim_deg in setup_species_richness_maps (not set here).
+
+# Toggle panel label and title (set TRUE/FALSE as needed)
+show_panel_label <- TRUE
+show_panel_title <- TRUE
+
+# Build the panel title string based on toggles
+make_panel_title <- function(label, title) {
+  if (show_panel_label && show_panel_title) {
+    return(sprintf("%s %s", label, title))
+  }
+  if (show_panel_label) {
+    return(label)
+  }
+  if (show_panel_title) {
+    return(title)
+  }
+  NULL
+}
+
+# Remove title elements entirely when toggled off
+apply_title_toggle <- function(plot_obj, title_text) {
+  if (is.null(title_text)) {
+    plot_obj + labs(title = NULL) + theme(plot.title = element_blank())
+  } else {
+    plot_obj
+  }
+}
+
+# Map metrics of interest (apply_lat_axis_labels is in 00_functions.R)
+skate_title <- make_panel_title("a.", "skate richness")
+ray_title <- make_panel_title("c.", "ray richness")
+
+species_richness_map_skate <- plot_species_richness_map(
+  hex_with_metrics_skates,
+  map_title = skate_title,
+  ylim_lat_deg = pub_lat_ylim_deg
+)
+species_richness_map_skate <- apply_title_toggle(species_richness_map_skate, skate_title)
+species_richness_map_skate <- apply_lat_axis_labels(species_richness_map_skate)
+# species_richness_map_skate
+
+species_richness_map_ray <- plot_species_richness_map(
+  hex_with_metrics_rays,
+  map_title = ray_title,
+  ylim_lat_deg = pub_lat_ylim_deg
+)
+species_richness_map_ray <- apply_title_toggle(species_richness_map_ray, ray_title)
+species_richness_map_ray <- apply_lat_axis_labels(species_richness_map_ray)
+# species_richness_map_ray
+
+# Arrange plots on vertical page
+full_output <- species_richness_map_skate + species_richness_map_ray + plot_layout(ncol = 1)
+# Date tag for output filenames (yymmdd)
+date_tag <- format(Sys.Date(), "%y%m%d")
+# Export to PDF and PNG
+ggsave(
+  here(sprintf("mapping/figures/SkateRayRichness_%s.pdf", date_tag)),
+  plot = full_output,
+  width = 7,
+  height = 10,
+  units = "in"
+)
+
+ggsave(
+  filename = here(sprintf("mapping/figures/SkateRayRichness_%s.png", date_tag)),
+  plot = full_output,
+  width = 7,
+  height = 10,
+  units = "in",
+  dpi = 600
+)
+```
+
+```{r publication_four_panel_pointer}
+# Four-panel figure (maps + latitude–richness scatters) lives in its own report so layout code does
+# not depend on objects from this file’s map chunk. Knit:
+#   mapping/03_SkateRayRichnessPublication.Rmd
+# Reversed viridis variant → 03b_SkateRayRichnessPublicationReversed.Rmd
+# Use the same pub_lat_ylim_deg here and there if you want matching vertical extent.
+```
+
+```{r summary_statistics}
+# Chunk name suggestion: summary_statistics
+# Purpose: quick checks on skate/ray ranges and compilation years.
+str(ranges_skates)
+length(unique(ranges_skates$sci_name))
+
+hist(ranges_skates$yrcompiled)
+
+ranges_skates$sci_name[ranges_skates$yrcompiled == 2022]
+
+
+str(ranges_rays)
+length(unique(ranges_rays$sci_name))
+
+hist(ranges_rays$yrcompiled)
+```
+
+
+

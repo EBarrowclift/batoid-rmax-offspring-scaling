@@ -1,0 +1,567 @@
+---
+title: "RichnessLatitude"
+author: "Nicholas K. Dulvy"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Richness vs. latitude plots (viridis colour scale, blue = high richness vs yellow = low richness)
+
+Open this repo in Cursor, then run chunks from top to bottom. If you render the
+whole document, do so from the repo root so `here()` resolves paths correctly.
+
+Reversed viridis variant: **`04b_RichnessLatitudeReversed.Rmd`**.
+
+```{r}
+# Core libraries for spatial + plotting
+library(sf)
+library(dplyr)
+library(tidyverse)
+library(here)
+library(chondrichthyes.species.ranges)
+library(future.apply)
+library(hexbin)
+
+# Plotting + layout helpers
+library(patchwork)
+library(rnaturalearth)
+library(furrr)
+library(purrr)
+library(tictoc)
+library(beepr)
+# Load shared functions
+source(here("mapping/00_functions.R"))
+
+# 02_SpeciesRichnessMaps.Rmd maps + lat panels use theme_bw(); match grey20 panel box & axis ticks,
+# with larger type than the default 11 pt base.
+theme_richness_latitude <- function(base_size = 14, base_family = "") {
+  theme_bw(base_size = base_size, base_family = base_family) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, colour = "grey20", linewidth = rel(1)),
+      axis.ticks = element_line(colour = "grey20", linewidth = rel(0.5)),
+      plot.title.position = "plot",
+      plot.title = element_text(face = "bold", hjust = 0)
+    )
+}
+```
+
+
+```{r data_loading}
+# Chunk name suggestion: data_loading
+# Purpose: load precomputed spatial inputs used throughout this file.
+# Load required spatial inputs. If these files are missing, run
+# mapping/01_SpatialDataProcessing.Rmd first.
+# This script expects:
+# - Precomputed hex/ranges/metrics in data/processed
+hex_path <- here("data/processed/hex.rds")
+if (!file.exists(hex_path)) {
+  stop("Missing data/processed/hex.rds. Run 01_SpatialDataProcessing.Rmd first.")
+}
+hex <- readRDS(hex_path)
+
+# Species ranges (precomputed)
+ranges_path <- here("data/processed/ranges.rds")
+if (!file.exists(ranges_path)) {
+  stop("Missing data/processed/ranges.rds. Run 01_SpatialDataProcessing.Rmd first.")
+}
+ranges <- readRDS(ranges_path)
+
+# Skate/ray metric grids (precomputed)
+hex_metrics_skates_path <- here("data/processed/hex_with_metrics_skates.rds")
+hex_metrics_rays_path <- here("data/processed/hex_with_metrics_rays.rds")
+if (!file.exists(hex_metrics_skates_path) || !file.exists(hex_metrics_rays_path)) {
+  stop("Missing hex_with_metrics_*.rds. Run 01_SpatialDataProcessing.Rmd first.")
+}
+hex_with_metrics_skates <- readRDS(hex_metrics_skates_path)
+hex_with_metrics_rays <- readRDS(hex_metrics_rays_path)
+
+# Optional: unique-richness grid (precomputed)
+hex_in_path <- here("data/processed/hex_in_richness_unique.rds")
+hex_in <- if (file.exists(hex_in_path)) readRDS(hex_in_path) else NULL
+```
+
+
+```{r metrics_skates_rays}
+# Chunk name suggestion: metrics_skates_rays
+# Purpose: skate/ray metrics are loaded in data_loading from precomputed files.
+```
+
+```{r lat_richness_publication_plots}
+# Chunk name suggestion: lat_richness_publication_plots
+# Purpose: create publication-ready latitude–richness plots for skates and rays
+# using precomputed hex metrics and dated PNG outputs.
+date_tag <- format(Sys.Date(), "%y%m%d")
+
+if (!exists("hex_with_metrics_skates") || !exists("hex_with_metrics_rays")) {
+  hex_metrics_skates_path <- here::here("data/processed/hex_with_metrics_skates.rds")
+  hex_metrics_rays_path <- here::here("data/processed/hex_with_metrics_rays.rds")
+  if (!file.exists(hex_metrics_skates_path) || !file.exists(hex_metrics_rays_path)) {
+    stop("Missing hex_with_metrics_*.rds. Run 01_SpatialDataProcessing.Rmd first.")
+  }
+  hex_with_metrics_skates <- readRDS(hex_metrics_skates_path)
+  hex_with_metrics_rays <- readRDS(hex_metrics_rays_path)
+}
+
+add_lat_lon <- function(sf_obj) {
+  # Compute centroid points and attach lon/lat (WGS84) to the sf object
+  pts <- st_point_on_surface(sf_obj)
+  pts_ll <- st_transform(pts, 4326)
+  coords <- st_coordinates(pts_ll)
+  sf_obj$lon <- coords[, "X"]
+  sf_obj$lat <- coords[, "Y"]
+  sf_obj
+}
+
+plot_lat_richness <- function(sf_obj, title_text) {
+  # Drop geometry, remove zeros, and bin latitude into 5-degree bands
+  # Upper-envelope line follows 02_SpeciesRichnessMaps.Rmd (loess on bin-wise 95th %ile)
+  plot_df <- sf_obj %>%
+    st_drop_geometry() %>%
+    dplyr::ungroup() %>%
+    mutate(lat = as.numeric(lat)) %>%
+    filter(is.finite(lat), is.finite(species_richness), species_richness > 0) %>%
+    mutate(lat_bin = floor(lat / 5) * 5)
+
+  p95_df <- plot_df %>%
+    group_by(lat_bin) %>%
+    summarise(
+      lat_mid = dplyr::first(lat_bin) + 2.5,
+      richness_p95 = quantile(species_richness, 0.95, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(lat_mid)
+
+  loess_fit <- loess(richness_p95 ~ lat_mid, data = p95_df, span = 0.5)
+  p95_df$richness_fit <- pmax(0, predict(loess_fit, newdata = p95_df))
+
+  # Check axis ranges (x = richness, y = latitude)
+  x_range <- range(plot_df$species_richness, na.rm = TRUE)
+  y_range <- range(plot_df$lat, na.rm = TRUE)
+  message(sprintf("Richness range: %.2f to %.2f", x_range[1], x_range[2]))
+  message(sprintf("Latitude range: %.2f to %.2f", y_range[1], y_range[2]))
+
+  ggplot(plot_df, aes(x = species_richness, y = lat)) +
+    # Solid, slightly larger points colored by richness (yellow -> blue)
+    geom_point(aes(color = species_richness), size = 1.2, alpha = 1) +
+    scale_color_viridis_c(option = "D", direction = -1) +
+    geom_path(
+      data = p95_df,
+      aes(x = richness_fit, y = lat_mid),
+      color = "grey40",
+      linewidth = 2.1,
+      inherit.aes = FALSE
+    ) +
+    coord_cartesian(xlim = c(0, 80), ylim = c(-90, 90), expand = FALSE) +
+    scale_y_continuous(
+      breaks = c(-90, -60, -30, 0, 30, 60, 90),
+      labels = c("90°S", "60°S", "30°S", "0°", "30°N", "60°N", "90°N")
+    ) +
+    theme_richness_latitude() +
+    theme(
+      legend.position = "inside",
+      legend.position.inside = c(0.98, 0.5),
+      legend.justification = c(1, 0.5),
+      legend.background = element_rect(fill = "white", color = NA),
+      legend.margin = margin(6, 6, 6, 6)
+    ) +
+    labs(
+      title = title_text,
+      x = "Species richness",
+      y = "Latitude",
+      color = "Richness"
+    )
+}
+
+hex_with_metrics_skates <- add_lat_lon(hex_with_metrics_skates)
+hex_with_metrics_rays <- add_lat_lon(hex_with_metrics_rays)
+
+skate_plot <- plot_lat_richness(
+  hex_with_metrics_skates,
+  "A."
+)
+
+ray_plot <- plot_lat_richness(
+  hex_with_metrics_rays,
+  "B."
+)
+
+# Combine with skate above ray and shared x-range
+lat_richness_combined <- skate_plot / ray_plot
+
+# Combined figure (skates above rays)
+ggsave(
+  filename = here::here(sprintf("mapping/figures/lat_richness_combined_%s.png", date_tag)),
+  plot = lat_richness_combined,
+  width = 7,
+  height = 10,
+  units = "in",
+  dpi = 600
+)
+
+# Save PNGs with date tag (yymmdd) for reproducibility
+ggsave(
+  filename = here::here(sprintf("mapping/figures/skate_richness_latitude_%s.png", date_tag)),
+  plot = skate_plot,
+  width = 7,
+  height = 5,
+  units = "in",
+  dpi = 600
+)
+
+ggsave(
+  filename = here::here(sprintf("mapping/figures/ray_richness_latitude_%s.png", date_tag)),
+  plot = ray_plot,
+  width = 7,
+  height = 5,
+  units = "in",
+  dpi = 600
+)
+```
+
+```{r lat_on_x_richness_on_y}
+# Chunk name suggestion: lat_on_x_richness_on_y
+# Purpose: plot latitude on x and richness on y with loess; export combined layouts.
+
+plot_lat_richness_xy <- function(sf_obj, title_text, y_label) {
+  plot_df <- sf_obj %>%
+    st_drop_geometry() %>%
+    filter(is.finite(lat), is.finite(species_richness), species_richness > 0) %>%
+    mutate(lat_bin = floor(lat / 5) * 5)
+
+  # Upper-centile envelope to smooth (edit to explore sensitivity)
+  centile <- 0.90
+  centile_df <- plot_df %>%
+    group_by(lat_bin) %>%
+    summarise(
+      lat_mid = lat_bin + 2.5,
+      richness_centile = quantile(species_richness, centile, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(richness_centile = pmax(0, richness_centile))
+
+  ggplot(plot_df, aes(x = lat, y = species_richness)) +
+    geom_point(aes(color = species_richness), size = 1.2, alpha = 1) +
+    scale_color_viridis_c(option = "D", direction = -1) +
+    geom_smooth(
+      data = centile_df,
+      aes(x = lat_mid, y = richness_centile),
+      method = "loess",
+      span = 0.25,
+      se = FALSE,
+      color = "grey25",
+      linewidth = 1.5,
+      inherit.aes = FALSE
+    ) +
+    coord_cartesian(xlim = c(-90, 90), ylim = c(0, 80), expand = FALSE) +
+    scale_x_continuous(
+      breaks = c(-90, -60, -30, 0, 30, 60, 90),
+      labels = c("90°S", "60°S", "30°S", "0°", "30°N", "60°N", "90°N")
+    ) +
+    theme_richness_latitude() +
+    theme(
+      legend.position = "inside",
+      legend.position.inside = c(0.98, 0.5),
+      legend.justification = c(1, 0.5),
+      legend.background = element_rect(fill = "white", color = NA),
+      legend.margin = margin(6, 6, 6, 6)
+    ) +
+    labs(
+      title = title_text,
+      x = "Latitude",
+      y = y_label,
+      color = "Richness"
+    )
+}
+
+skate_plot_xy <- plot_lat_richness_xy(
+  hex_with_metrics_skates,
+  "A.",
+  "Skate richness"
+)
+ray_plot_xy <- plot_lat_richness_xy(
+  hex_with_metrics_rays,
+  "B.",
+  "Ray richness"
+)
+
+# Stack: skates on top, rays on bottom
+lat_x_stack <- skate_plot_xy / ray_plot_xy
+
+# Side-by-side: skates left, rays right
+lat_x_side <- skate_plot_xy | ray_plot_xy
+
+ggsave(
+  filename = here::here(sprintf("mapping/figures/lat_x_richness_y_stack_%s.png", date_tag)),
+  plot = lat_x_stack,
+  width = 7,
+  height = 10,
+  units = "in",
+  dpi = 600
+)
+
+ggsave(
+  filename = here::here(sprintf("mapping/figures/lat_x_richness_y_side_%s.png", date_tag)),
+  plot = lat_x_side,
+  width = 10,
+  height = 5,
+  units = "in",
+  dpi = 600
+)
+```
+
+```{r lat_on_x_richness_on_y_no_labels}
+# Chunk name suggestion: lat_on_x_richness_on_y_no_labels
+# Purpose: plot latitude on x and richness on y with loess; export layouts
+# without titles or axis labels (colour legend on the right).
+
+plot_lat_richness_xy_nolabels <- function(sf_obj) {
+  plot_df <- sf_obj %>%
+    st_drop_geometry() %>%
+    filter(is.finite(lat), is.finite(species_richness), species_richness > 0) %>%
+    mutate(lat_bin = floor(lat / 5) * 5)
+
+  # Upper-centile envelope to smooth (edit to explore sensitivity)
+  centile <- 0.90
+  centile_df <- plot_df %>%
+    group_by(lat_bin) %>%
+    summarise(
+      lat_mid = lat_bin + 2.5,
+      richness_centile = quantile(species_richness, centile, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(richness_centile = pmax(0, richness_centile))
+
+  ggplot(plot_df, aes(x = lat, y = species_richness)) +
+    geom_point(aes(color = species_richness), size = 1.2, alpha = 1) +
+    scale_color_viridis_c(option = "D", direction = -1) +
+    geom_smooth(
+      data = centile_df,
+      aes(x = lat_mid, y = richness_centile),
+      method = "loess",
+      span = 0.4,
+      se = FALSE,
+      color = "grey25",
+      linewidth = 1.5,
+      inherit.aes = FALSE
+    ) +
+    coord_cartesian(xlim = c(-90, 90), ylim = c(0, 80), expand = FALSE) +
+    scale_x_continuous(
+      breaks = c(-90, -60, -30, 0, 30, 60, 90),
+      labels = c("90°S", "60°S", "30°S", "0°", "30°N", "60°N", "90°N")
+    ) +
+    theme_richness_latitude() +
+    theme(
+      legend.position = "inside",
+      legend.position.inside = c(0.98, 0.5),
+      legend.justification = c(1, 0.5),
+      legend.background = element_rect(fill = "white", color = NA),
+      legend.margin = margin(6, 6, 6, 6),
+      plot.title = element_blank(),
+      axis.title = element_blank()
+    ) +
+    labs(color = "Richness")
+}
+
+skate_plot_xy_nolabels <- plot_lat_richness_xy_nolabels(hex_with_metrics_skates)
+ray_plot_xy_nolabels <- plot_lat_richness_xy_nolabels(hex_with_metrics_rays)
+
+# Stack: skates on top, rays on bottom
+lat_x_stack_nolabels <- skate_plot_xy_nolabels / ray_plot_xy_nolabels
+
+# Side-by-side: skates left, rays right
+lat_x_side_nolabels <- skate_plot_xy_nolabels | ray_plot_xy_nolabels
+
+ggsave(
+  filename = here::here(sprintf("mapping/figures/lat_x_richness_y_stack_%s.png", date_tag)),
+  plot = lat_x_stack_nolabels,
+  width = 7,
+  height = 10,
+  units = "in",
+  dpi = 600
+)
+
+ggsave(
+  filename = here::here(sprintf("mapping/figures/lat_x_richness_y_side_%s.png", date_tag)),
+  plot = lat_x_side_nolabels,
+  width = 10,
+  height = 5,
+  units = "in",
+  dpi = 600
+)
+```
+
+```{r lat_on_x_richness_on_y_loess_peak}
+# Chunk name suggestion: lat_on_x_richness_on_y_loess_peak
+# Purpose: identify latitude(s) where the loess envelope reaches its peak.
+# Handles unimodal and bimodal curves by finding local maxima and splitting
+# peaks by hemisphere.
+
+build_centile_envelope <- function(sf_obj, centile = 0.90) {
+  plot_df <- sf_obj %>%
+    st_drop_geometry() %>%
+    filter(is.finite(lat), is.finite(species_richness), species_richness > 0) %>%
+    mutate(lat_bin = floor(lat / 5) * 5)
+
+  plot_df %>%
+    group_by(lat_bin) %>%
+    reframe(
+      lat_mid = lat_bin + 2.5,
+      richness_centile = quantile(species_richness, centile, na.rm = TRUE)
+    ) %>%
+    mutate(richness_centile = pmax(0, richness_centile))
+}
+
+predict_loess_curve <- function(centile_df, span = 0.4, lat_step = 0.1) {
+  loess_fit <- loess(richness_centile ~ lat_mid, data = centile_df, span = span)
+  lat_seq <- seq(-90, 90, by = lat_step)
+  preds <- predict(loess_fit, newdata = data.frame(lat_mid = lat_seq))
+  tibble(lat = lat_seq, pred = preds)
+}
+
+find_local_maxima <- function(curve_df, tol = 0.01) {
+  df <- curve_df %>%
+    filter(is.finite(pred))
+
+  if (nrow(df) < 3) {
+    return(tibble(peak_lat = numeric(0), peak_value = numeric(0)))
+  }
+
+  d1 <- diff(df$pred)
+  sign_change <- d1[-1] <= 0 & d1[-length(d1)] > 0
+  idx <- which(sign_change) + 1
+
+  peaks <- df[idx, , drop = FALSE]
+  if (nrow(peaks) == 0) {
+    max_val <- max(df$pred, na.rm = TRUE)
+    peak_lats <- df$lat[abs(df$pred - max_val) <= tol]
+    return(tibble(
+      peak_lat = if (length(peak_lats) > 0) peak_lats else df$lat[which.max(df$pred)],
+      peak_value = max_val
+    ))
+  }
+
+  # Expand peaks to plateaus within tolerance of each local max
+  peaks <- peaks %>%
+    mutate(
+      peak_value = pred,
+      peak_lat = lat
+    ) %>%
+    select(peak_lat, peak_value)
+
+  peaks
+}
+
+summarise_peaks <- function(peaks_df, group_label) {
+  if (nrow(peaks_df) == 0) {
+    return(tibble(
+      group = group_label,
+      peak_type = "none",
+      peak_lat_min = NA_real_,
+      peak_lat_max = NA_real_,
+      peak_value = NA_real_
+    ))
+  }
+
+  peaks_df %>%
+    mutate(
+      peak_type = case_when(
+        peak_lat < 0 ~ "south",
+        peak_lat > 0 ~ "north",
+        TRUE ~ "equator"
+      )
+    ) %>%
+    group_by(peak_type) %>%
+    summarise(
+      group = group_label,
+      peak_lat_min = min(peak_lat, na.rm = TRUE),
+      peak_lat_max = max(peak_lat, na.rm = TRUE),
+      peak_value = max(peak_value, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+
+# tol controls how tightly peak plateaus are defined (smaller = narrower range)
+find_loess_peaks <- function(sf_obj, group_label, centile = 0.90, span = 0.4, lat_step = 0.1, tol = 0.005) {
+  centile_df <- build_centile_envelope(sf_obj, centile = centile)
+  curve_df <- predict_loess_curve(centile_df, span = span, lat_step = lat_step)
+  peaks_df <- find_local_maxima(curve_df, tol = tol)
+  summarise_peaks(peaks_df, group_label)
+}
+
+peak_summary <- bind_rows(
+  find_loess_peaks(hex_with_metrics_skates, "Skates"),
+  find_loess_peaks(hex_with_metrics_rays, "Rays")
+)
+
+# Summary columns:
+# - peak_type: hemisphere of each local maximum (south/north/equator)
+# - peak_lat_min/peak_lat_max: latitude range for a peak (plateau if range > 0)
+# - peak_value: max loess envelope value within that peak range
+print(peak_summary)
+```
+
+```{r lat_richness_hexbin}
+# Chunk name suggestion: lat_richness_hexbin
+# Purpose: hexbin plots of richness vs latitude for skates and rays.
+
+if (!requireNamespace("hexbin", quietly = TRUE)) {
+  stop("Package 'hexbin' is required for geom_hex(). Install with install.packages('hexbin').")
+}
+
+plot_lat_richness_hexbin <- function(sf_obj, title_text, y_label) {
+  plot_df <- sf_obj %>%
+    st_drop_geometry() %>%
+    filter(is.finite(lat), is.finite(species_richness), species_richness > 0)
+
+  ggplot(plot_df, aes(x = lat, y = species_richness)) +
+    # Hexbin density (bins controls resolution)
+    geom_hex(bins = 40) +
+    scale_fill_viridis_c(option = "D", direction = -1) +
+    coord_cartesian(xlim = c(-90, 90), ylim = c(0, 80), expand = FALSE) +
+    scale_x_continuous(
+      breaks = c(-90, -60, -30, 0, 30, 60, 90),
+      labels = c("90°S", "60°S", "30°S", "0°", "30°N", "60°N", "90°N")
+    ) +
+    theme_richness_latitude() +
+    theme(
+      legend.position = "inside",
+      legend.position.inside = c(0.98, 0.5),
+      legend.justification = c(1, 0.5),
+      legend.background = element_rect(fill = "white", color = NA),
+      legend.margin = margin(6, 6, 6, 6)
+    ) +
+    labs(
+      title = title_text,
+      x = "Latitude",
+      y = y_label,
+      fill = "Count"
+    )
+}
+
+skate_hexbin <- plot_lat_richness_hexbin(hex_with_metrics_skates, "A.", "Skate richness")
+ray_hexbin <- plot_lat_richness_hexbin(hex_with_metrics_rays, "B.", "Ray richness")
+
+lat_hexbin_stack <- skate_hexbin / ray_hexbin
+lat_hexbin_side <- skate_hexbin | ray_hexbin
+
+# Stacked and side-by-side outputs
+ggsave(
+  filename = here::here(sprintf("mapping/figures/lat_richness_hexbin_stack_%s.png", date_tag)),
+  plot = lat_hexbin_stack,
+  width = 7,
+  height = 10,
+  units = "in",
+  dpi = 600
+)
+
+ggsave(
+  filename = here::here(sprintf("mapping/figures/lat_richness_hexbin_side_%s.png", date_tag)),
+  plot = lat_hexbin_side,
+  width = 10,
+  height = 5,
+  units = "in",
+  dpi = 600
+)
+```

@@ -1,0 +1,143 @@
+---
+title: "SharkRichness"
+author: "Nicholas K. Dulvy"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Running in Cursor
+
+Open this repo in Cursor, then run chunks from top to bottom. If you render the
+whole document, do so from the repo root so `here()` resolves paths correctly.
+
+```{r setup_shark_richness}
+# Chunk name suggestion: setup_shark_richness
+# Purpose: load packages, shared functions, and precomputed spatial inputs.
+
+# Dependencies:
+# - Packages: sf, dplyr, here, patchwork, rnaturalearth, ggplot2, hexbin
+# - Data: data/processed/hex.rds, data/processed/ranges.rds
+# - Functions: mapping/00_functions.R (calculate_hex_metrics2, plot_species_richness_map)
+
+library(sf)
+library(dplyr)
+library(here)
+library(patchwork)
+library(rnaturalearth)
+library(ggplot2)
+library(hexbin)
+library(purrr)
+library(furrr)
+library(future)
+
+# Load shared functions
+source(here("mapping/00_functions.R"))
+
+# Load precomputed spatial inputs
+hex_path <- here("data/processed/hex.rds")
+if (!file.exists(hex_path)) {
+  stop("Missing data/processed/hex.rds. Run 01_SpatialDataProcessing.Rmd first.")
+}
+hex <- readRDS(hex_path)
+
+ranges_path <- here("data/processed/ranges.rds")
+if (!file.exists(ranges_path)) {
+  stop("Missing data/processed/ranges.rds. Run 01_SpatialDataProcessing.Rmd first.")
+}
+ranges <- readRDS(ranges_path)
+```
+
+```{r shark_richness_map}
+# Chunk name suggestion: shark_richness_map
+# Purpose: compute and map shark species richness by order.
+
+# Orders included as sharks (confirmed by user)
+shark_orders <- c(
+  "CARCHARHINIFORMES",
+  "LAMNIFORMES",
+  "ORECTOLOBIFORMES",
+  "HETERODONTIFORMES",
+  "SQUALIFORMES",
+  "HEXANCHIFORMES",
+  "PRISTIOPHORIFORMES",
+  "SQUATINIFORMES"
+)
+
+# Filter to shark ranges
+ranges_sharks <- ranges %>%
+  filter(order_ %in% shark_orders)
+
+# Compute richness metrics and map
+hex_with_metrics_sharks <- calculate_hex_metrics2(ranges_sharks, hex)
+
+shark_richness_map <- plot_species_richness_map(
+  hex_with_metrics_sharks,
+  map_title = "Shark richness"
+) %>%
+  apply_lat_axis_labels()
+
+shark_richness_map
+
+# Date tag for output filenames (yymmdd)
+date_tag <- format(Sys.Date(), "%y%m%d")
+
+ggsave(
+  filename = here(sprintf("mapping/figures/SharkRichness_%s.png", date_tag)),
+  plot = shark_richness_map,
+  width = 7,
+  height = 5,
+  units = "in",
+  dpi = 600
+)
+```
+
+```{r shark_richness_hexbin}
+# Chunk name suggestion: shark_richness_hexbin
+# Purpose: hexbin plot of shark richness versus latitude.
+
+add_lat_lon <- function(sf_obj) {
+  pts <- st_point_on_surface(sf_obj)
+  pts_ll <- st_transform(pts, 4326)
+  coords <- st_coordinates(pts_ll)
+  sf_obj$lon <- coords[, "X"]
+  sf_obj$lat <- coords[, "Y"]
+  sf_obj
+}
+
+hex_with_metrics_sharks <- add_lat_lon(hex_with_metrics_sharks)
+
+hexbin_df <- hex_with_metrics_sharks %>%
+  st_drop_geometry() %>%
+  filter(is.finite(lat), is.finite(species_richness), species_richness > 0)
+
+shark_hexbin <- ggplot(hexbin_df, aes(x = lat, y = species_richness)) +
+  geom_hex(bins = 40) +
+  scale_fill_viridis_c(option = "D", direction = -1) +
+  coord_cartesian(xlim = c(-90, 90), ylim = c(0, 65), expand = FALSE) +
+  scale_x_continuous(
+    breaks = c(-90, -60, -30, 0, 30, 60, 90),
+    labels = c("90°S", "60°S", "30°S", "0°", "30°N", "60°N", "90°N")
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Shark richness vs latitude",
+    x = "Latitude",
+    y = "Species richness",
+    fill = "Count"
+  )
+
+shark_hexbin
+
+ggsave(
+  filename = here(sprintf("mapping/figures/SharkRichness_Hexbin_%s.png", date_tag)),
+  plot = shark_hexbin,
+  width = 7,
+  height = 5,
+  units = "in",
+  dpi = 600
+)
+```

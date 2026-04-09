@@ -2,3 +2,6 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# Large spatial caches from mapping/01_SpatialDataProcessing.Rmd (regenerate or copy locally)
+data/processed/*.rds
