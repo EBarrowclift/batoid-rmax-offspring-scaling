@@ -2,6 +2,13 @@
 
 Self-contained pipeline for global batoid species-richness maps and latitude diagnostics. Open the **repository root** in RStudio (or Cursor) so `here::here()` resolves paths; do not set the working directory only to `mapping/`.
 
+## Processed mapping data (`.rds` files)
+
+The generated spatial caches in **`data/processed/`** (for example `hex.rds`, `ranges.rds`, `hex_with_metrics_skates.rds`, `hex_with_metrics_rays.rds`) are **too large to store in this GitHub repository**. To obtain them you can either:
+
+1. Run **`01_SpatialDataProcessing.Rmd`** locally (requires **`chondrichthyes.species.ranges`** and time; see below), or  
+2. **Request the `.rds` files** by emailing **dulvy@sfu.ca**.
+
 ## Components
 
 | Piece | Role |
